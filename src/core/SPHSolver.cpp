@@ -1,0 +1,339 @@
+#include "../../include/core/SPHSolver.hpp"
+#include <cmath>
+#include <algorithm>
+#include <iostream>
+
+SPHSolver::SPHSolver()
+    : spatialHash_(SimConfig::H)
+    , nextId_(0)
+{
+    // Precompute kernel coefficients (done once, not per-frame)
+    poly6Coeff_     = SPHKernels::poly6Coeff(SimConfig::H);
+    spikyGradCoeff_ = SPHKernels::spikyGradCoeff(SimConfig::H);
+    viscLapCoeff_   = SPHKernels::viscLapCoeff(SimConfig::H);
+    wendlandCoeff_  = SPHKernels::wendlandC2Coeff(SimConfig::H);
+}
+
+// ============================================================
+// Initialization
+// ============================================================
+
+void SPHSolver::initDamBreak(int rows, int cols) {
+    particles_.clear();
+    particles_.reserve(rows * cols);
+
+    float spacing = SimConfig::PARTICLE_SPACING;
+    float startX = SimConfig::WINDOW_WIDTH * 0.1f;
+    float startY = SimConfig::WINDOW_HEIGHT * 0.3f;
+
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            // Small jitter to break symmetry
+            float jitterX = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.1f;
+            float jitterY = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.1f;
+
+            Particle p(startX + j * spacing + jitterX,
+                       startY + i * spacing + jitterY,
+                       nextId_++);
+            p.mass = SimConfig::PARTICLE_MASS;
+            particles_.push_back(p);
+        }
+    }
+
+    std::cout << "[SPH] Dam break initialized: " << particles_.size() << " particles\n";
+}
+
+void SPHSolver::initDroplet(float cx, float cy, float radius) {
+    particles_.clear();
+    float spacing = SimConfig::PARTICLE_SPACING;
+
+    for (float y = cy - radius; y <= cy + radius; y += spacing) {
+        for (float x = cx - radius; x <= cx + radius; x += spacing) {
+            float dx = x - cx;
+            float dy = y - cy;
+            if (dx * dx + dy * dy <= radius * radius) {
+                Particle p(x, y, nextId_++);
+                p.mass = SimConfig::PARTICLE_MASS;
+                particles_.push_back(p);
+            }
+        }
+    }
+
+    std::cout << "[SPH] Droplet initialized: " << particles_.size() << " particles\n";
+}
+
+void SPHSolver::addParticle(float x, float y) {
+    Particle p(x, y, nextId_++);
+    p.mass = SimConfig::PARTICLE_MASS;
+    particles_.push_back(p);
+}
+
+// ============================================================
+// Spatial Hash
+// ============================================================
+
+void SPHSolver::buildSpatialHash() {
+    spatialHash_.clear();
+    for (size_t i = 0; i < particles_.size(); ++i) {
+        spatialHash_.insert(static_cast<int>(i), particles_[i].position);
+    }
+}
+
+// ============================================================
+// Density & Pressure (Tait Equation of State)
+// ============================================================
+
+void SPHSolver::computeDensityPressure() {
+    std::vector<int> neighbors;
+
+    for (size_t i = 0; i < particles_.size(); ++i) {
+        auto& pi = particles_[i];
+        pi.density = 0.0f;
+
+        neighbors.clear();
+        spatialHash_.queryNeighbors(pi.position, neighbors);
+
+        for (int j : neighbors) {
+            const auto& pj = particles_[j];
+            Vec2 rij = pj.position - pi.position;
+            float r2 = rij.lengthSq();
+
+            if (r2 < SimConfig::HSQ) {
+                // Poly6 kernel for density
+                pi.density += pj.mass * SPHKernels::poly6(r2, SimConfig::H, poly6Coeff_);
+            }
+        }
+
+        // Clamp minimum density to avoid division by zero
+        pi.density = std::max(pi.density, SimConfig::REST_DENSITY * 0.5f);
+
+        // Tait equation of state: p = k * (ρ/ρ₀ - 1)
+        // Using the simpler variant: p = k * (ρ - ρ₀)
+        pi.pressure = SimConfig::GAS_CONSTANT * (pi.density - SimConfig::REST_DENSITY);
+    }
+}
+
+// ============================================================
+// Forces: Pressure + Viscosity
+// ============================================================
+
+void SPHSolver::computeForces() {
+    std::vector<int> neighbors;
+
+    for (size_t i = 0; i < particles_.size(); ++i) {
+        auto& pi = particles_[i];
+        Vec2 fPressure(0.0f, 0.0f);
+        Vec2 fViscosity(0.0f, 0.0f);
+
+        neighbors.clear();
+        spatialHash_.queryNeighbors(pi.position, neighbors);
+
+        for (int jIdx : neighbors) {
+            if (static_cast<size_t>(jIdx) == i) continue;  // Skip self
+
+            const auto& pj = particles_[jIdx];
+            Vec2 rij = pj.position - pi.position;
+            float r = rij.length();
+
+            if (r < SimConfig::H && r > 1e-6f) {
+                Vec2 rNorm = rij * (1.0f / r);
+
+                // Pressure force (Spiky kernel gradient)
+                // F_p = -m_j * (p_i + p_j) / (2 * ρ_j) * ∇W_spiky
+                float pressureMag = -pj.mass *
+                    (pi.pressure + pj.pressure) / (2.0f * pj.density) *
+                    SPHKernels::spikyGrad(r, SimConfig::H, spikyGradCoeff_);
+                fPressure += rNorm * pressureMag;
+
+                // Viscosity force (Viscosity kernel Laplacian)
+                // F_v = μ * m_j * (v_j - v_i) / ρ_j * ∇²W_visc
+                Vec2 velDiff = pj.velocity - pi.velocity;
+                float viscMag = SimConfig::VISCOSITY * pj.mass / pj.density *
+                    SPHKernels::viscLaplacian(r, SimConfig::H, viscLapCoeff_);
+                fViscosity += velDiff * viscMag;
+            }
+        }
+
+        // Gravity (downward in screen coordinates: +y is down)
+        Vec2 fGravity(0.0f, SimConfig::GRAVITY * pi.density);
+
+        // Sum all forces
+        pi.force = fPressure + fViscosity + fGravity;
+    }
+}
+
+// ============================================================
+// Surface Tension (CSF model)
+// ============================================================
+
+void SPHSolver::computeSurfaceTension() {
+    std::vector<int> neighbors;
+
+    // Step 1: Compute color field, gradient, and laplacian
+    for (size_t i = 0; i < particles_.size(); ++i) {
+        auto& pi = particles_[i];
+        pi.colorField = 0.0f;
+        pi.colorGradient = Vec2(0.0f, 0.0f);
+        pi.colorLaplacian = 0.0f;
+
+        neighbors.clear();
+        spatialHash_.queryNeighbors(pi.position, neighbors);
+
+        for (int jIdx : neighbors) {
+            const auto& pj = particles_[jIdx];
+            Vec2 rij = pj.position - pi.position;
+            float r2 = rij.lengthSq();
+
+            if (r2 < SimConfig::HSQ) {
+                float massOverDensity = pj.mass / pj.density;
+
+                // Color field
+                pi.colorField += massOverDensity * SPHKernels::poly6(r2, SimConfig::H, poly6Coeff_);
+
+                // Gradient of color field (using poly6 gradient)
+                float gradMag = SPHKernels::poly6Grad(r2, SimConfig::H, poly6Coeff_);
+                pi.colorGradient += rij * (massOverDensity * gradMag);
+
+                // Laplacian of color field
+                pi.colorLaplacian += massOverDensity * SPHKernels::poly6Laplacian(r2, SimConfig::H, poly6Coeff_);
+            }
+        }
+    }
+
+    // Step 2: Apply surface tension force where |∇c| is large enough
+    float threshold = 6.0f;  // Only apply near the surface
+    for (auto& pi : particles_) {
+        float gradLen = pi.colorGradient.length();
+        if (gradLen > threshold) {
+            // κ = -∇²c / |∇c|
+            float curvature = -pi.colorLaplacian / gradLen;
+
+            // F_st = σ * κ * n̂
+            Vec2 normal = pi.colorGradient.normalized();
+            pi.force += normal * (SimConfig::SURFACE_TENSION * curvature * pi.density);
+        }
+    }
+}
+
+// ============================================================
+// XSPH Velocity Correction
+// ============================================================
+
+void SPHSolver::applyXSPH() {
+    // Compute corrections first, apply after (so we don't modify while iterating)
+    std::vector<Vec2> corrections(particles_.size(), Vec2(0.0f, 0.0f));
+    std::vector<int> neighbors;
+
+    for (size_t i = 0; i < particles_.size(); ++i) {
+        const auto& pi = particles_[i];
+        neighbors.clear();
+        spatialHash_.queryNeighbors(pi.position, neighbors);
+
+        for (int jIdx : neighbors) {
+            if (static_cast<size_t>(jIdx) == i) continue;
+
+            const auto& pj = particles_[jIdx];
+            Vec2 rij = pj.position - pi.position;
+            float r2 = rij.lengthSq();
+
+            if (r2 < SimConfig::HSQ) {
+                float avgDensity = (pi.density + pj.density) * 0.5f;
+                float w = SPHKernels::poly6(r2, SimConfig::H, poly6Coeff_);
+                corrections[i] += (pj.velocity - pi.velocity) * (pj.mass / avgDensity * w);
+            }
+        }
+    }
+
+    // Apply XSPH correction
+    for (size_t i = 0; i < particles_.size(); ++i) {
+        particles_[i].velocity += corrections[i] * SimConfig::XSPH_EPSILON;
+    }
+}
+
+// ============================================================
+// Integration (Symplectic Euler)
+// ============================================================
+
+void SPHSolver::integrate() {
+    float dt = SimConfig::DT;
+
+    for (auto& p : particles_) {
+        // a = F / ρ
+        Vec2 acceleration = p.force / p.density;
+
+        // Symplectic Euler (updates velocity first, then position)
+        // This is energy-conserving unlike standard Euler
+        p.velocity += acceleration * dt;
+        p.position += p.velocity * dt;
+    }
+}
+
+// ============================================================
+// Boundary Enforcement
+// ============================================================
+
+void SPHSolver::enforceBoundaries() {
+    float damping = SimConfig::BOUNDARY_DAMPING;
+    float margin = SimConfig::H * 0.5f;
+
+    for (auto& p : particles_) {
+        // Left wall
+        if (p.position.x < margin) {
+            p.position.x = margin;
+            p.velocity.x *= damping;
+        }
+        // Right wall
+        if (p.position.x > SimConfig::WINDOW_WIDTH - margin) {
+            p.position.x = SimConfig::WINDOW_WIDTH - margin;
+            p.velocity.x *= damping;
+        }
+        // Bottom wall
+        if (p.position.y > SimConfig::WINDOW_HEIGHT - margin) {
+            p.position.y = SimConfig::WINDOW_HEIGHT - margin;
+            p.velocity.y *= damping;
+        }
+        // Top wall
+        if (p.position.y < margin) {
+            p.position.y = margin;
+            p.velocity.y *= damping;
+        }
+    }
+}
+
+// ============================================================
+// Adaptive Timestep (CFL condition)
+// ============================================================
+
+float SPHSolver::computeAdaptiveDT() const {
+    float maxVel = 0.0f;
+    float maxAcc = 0.0f;
+
+    for (const auto& p : particles_) {
+        float v = p.velocity.length();
+        float a = (p.density > 0.0f) ? (p.force / p.density).length() : 0.0f;
+        maxVel = std::max(maxVel, v);
+        maxAcc = std::max(maxAcc, a);
+    }
+
+    float dtVel = (maxVel > 1e-6f) ? (SimConfig::H / maxVel) : SimConfig::DT * 10.0f;
+    float dtAcc = (maxAcc > 1e-6f) ? std::sqrt(SimConfig::H / maxAcc) : SimConfig::DT * 10.0f;
+
+    float dt = SimConfig::CFL_FACTOR * std::min(dtVel, dtAcc);
+
+    // Clamp to reasonable range
+    return std::clamp(dt, SimConfig::DT * 0.1f, SimConfig::DT * 5.0f);
+}
+
+// ============================================================
+// Main Update
+// ============================================================
+
+void SPHSolver::update() {
+    buildSpatialHash();
+    computeDensityPressure();
+    computeForces();
+    computeSurfaceTension();
+    integrate();
+    applyXSPH();
+    enforceBoundaries();
+}
