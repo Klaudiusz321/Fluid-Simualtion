@@ -3,7 +3,7 @@
 #include "../include/render/FluidRenderer.hpp"
 #include "../include/core/SimConfig.hpp"
 
-#include <glad/glad.h>
+#include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <string>

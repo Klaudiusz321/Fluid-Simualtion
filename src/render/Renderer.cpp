@@ -1,6 +1,6 @@
 #include "../../include/render/Renderer.hpp"
 
-#include <glad/glad.h>
+#include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <iostream>
 
@@ -40,8 +40,8 @@ bool Renderer::init(int width, int height, const char* title) {
     // VSync
     glfwSwapInterval(1);
 
-    // Load OpenGL function pointers via GLAD
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+    // Load OpenGL function pointers via GLAD2
+    if (!gladLoadGL(glfwGetProcAddress)) {
         std::cerr << "[Renderer] Failed to initialize GLAD\n";
         return false;
     }

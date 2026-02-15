@@ -1,6 +1,6 @@
 #include "../../include/render/FluidRenderer.hpp"
 
-#include <glad/glad.h>
+#include <glad/gl.h>
 #include <iostream>
 #include <vector>
 
