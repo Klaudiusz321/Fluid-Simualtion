@@ -23,8 +23,8 @@ namespace SimConfig {
     constexpr float DT            = 0.003f;       // Fixed timestep
     constexpr float GRAVITY       = 200.0f;       // Gravity (px/s²)
 
-    // Surface tension coefficient (σ) — disabled, set > 0 to enable
-    constexpr float SURFACE_TENSION = 0.0f;
+    // Surface tension coefficient (σ) — keeps fluid cohesive
+    constexpr float SURFACE_TENSION = 0.5f;
 
     // XSPH velocity smoothing factor (ε)
     constexpr float XSPH_EPSILON  = 0.5f;

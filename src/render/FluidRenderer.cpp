@@ -69,12 +69,13 @@ void main() {
     float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
 
     // --- Velocity-based color ---
-    // speed: 0 = still (deep blue), ~500+ = fast (light cyan/white)
-    float t = clamp(vSpeed / 500.0, 0.0, 1.0);
+    // speed: 0 = still (deep blue), ~150+ = fast (cyan/white)
+    // Typical sim velocities: 0-200 px/s, so divide by 150 for full range
+    float t = clamp(vSpeed / 150.0, 0.0, 1.0);
 
     vec3 slowColor = uBaseColor.rgb;                      // Deep blue
-    vec3 midColor  = vec3(0.2, 0.6, 1.0);                // Bright blue
-    vec3 fastColor = vec3(0.7, 0.9, 1.0);                // Cyan-white
+    vec3 midColor  = vec3(0.1, 0.75, 0.95);              // Teal / cyan
+    vec3 fastColor = vec3(0.85, 0.95, 1.0);              // Near-white
 
     vec3 baseColor;
     if (t < 0.5) {
@@ -176,7 +177,7 @@ void FluidRenderer::render(float /*time*/) {
 
     glUseProgram(shader_);
     setOrthoProjection(shader_, w, h);
-    glUniform1f(glGetUniformLocation(shader_, "uPointSize"), 10.0f);
+    glUniform1f(glGetUniformLocation(shader_, "uPointSize"), 28.0f);
     glUniform4fv(glGetUniformLocation(shader_, "uBaseColor"), 1, fluidColor_);
 
     glBindVertexArray(vao_);

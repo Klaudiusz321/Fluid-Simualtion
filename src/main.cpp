@@ -45,10 +45,10 @@ int main() {
     auto loadScene = [&](int scene) {
         currentScene = scene;
         switch (scene) {
-            case 1: solver.initDamBreak(50, 50); break;      // ~2500 particles
-            case 2: solver.initPool(0.30f);       break;     // fills bottom 30%
+            case 1: solver.initDamBreak(80, 60); break;      // ~4800 particles
+            case 2: solver.initPool(0.40f);       break;     // fills bottom 40%
             case 3: solver.initTallDam();         break;     // tall column
-            default: solver.initDamBreak(50, 50); break;
+            default: solver.initDamBreak(80, 60); break;
         }
         std::cout << "[Scene " << scene << "] " << solver.numParticles() << " particles\n";
     };

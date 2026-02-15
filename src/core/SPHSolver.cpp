@@ -151,7 +151,9 @@ void SPHSolver::computeDensityPressure() {
         pi.density = std::max(pi.density, SimConfig::REST_DENSITY * 0.01f);
 
         // Tait equation of state: p = k * (ρ - ρ₀)
-        pi.pressure = SimConfig::GAS_CONSTANT * (pi.density - SimConfig::REST_DENSITY);
+        // Clamp to non-negative to prevent tensile instability
+        // (negative pressure creates artificial attraction → particle clumping)
+        pi.pressure = std::max(0.0f, SimConfig::GAS_CONSTANT * (pi.density - SimConfig::REST_DENSITY));
     }
 }
 
@@ -179,8 +181,12 @@ void SPHSolver::computeForces() {
                 Vec2 rNorm = rij * (1.0f / r);
 
                 // Pressure force (Spiky kernel gradient)
-                // F_p = -m_j * (p_i + p_j) / (2 * ρ_j) * ∇W_spiky
-                float pressureMag = -pj.mass *
+                // rij = r_j - r_i, so rNorm points from i toward j.
+                // ∇_i W = W'(r) * (r_i - r_j)/r = W'(r) * (-rNorm)
+                // F_p = -m_j (p_i+p_j)/(2ρ_j) * ∇_i W
+                //      = -m_j (p_i+p_j)/(2ρ_j) * W'(r) * (-rNorm)
+                //      = rNorm * [m_j (p_i+p_j)/(2ρ_j) * W'(r)]
+                float pressureMag = pj.mass *
                     (pi.pressure + pj.pressure) / (2.0f * pj.density) *
                     SPHKernels::spikyGrad(r, SimConfig::H, spikyGradCoeff_);
                 fPressure += rNorm * pressureMag;
