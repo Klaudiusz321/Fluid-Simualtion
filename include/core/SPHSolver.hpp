@@ -18,6 +18,12 @@ public:
     /// Initialize particles in a circular droplet
     void initDroplet(float cx, float cy, float radius);
 
+    /// Initialize a pool of water filling the bottom portion of the screen
+    void initPool(float fillFraction = 0.4f);
+
+    /// Initialize dam break with a tall column on the left
+    void initTallDam();
+
     /// Main physics step
     void update();
 
@@ -36,6 +42,7 @@ public:
 
 private:
     std::vector<Particle> particles_;
+    std::vector<Vec2> positions_;          // contiguous positions for spatial hash
     SpatialHash spatialHash_;
     
     // Precomputed kernel coefficients

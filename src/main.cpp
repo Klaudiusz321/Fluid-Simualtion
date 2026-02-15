@@ -9,23 +9,17 @@
 #include <string>
 
 // ============================================================
-// Fluid Simulation — Main Entry Point
+// SPH Fluid Simulation — Main Entry Point
 // ============================================================
-//
-// SPH (Smoothed Particle Hydrodynamics) fluid simulator
-// with spatial hashing, surface tension, XSPH correction,
-// and screen-space fluid rendering.
 //
 // Controls:
-//   Left Click  — Emit particles
-//   R           — Reset simulation
-//   SPACE       — Pause/Resume
-//   1           — Point rendering mode
-//   2           — Metaball (fluid surface) rendering mode
-//   ESC         — Quit
+//   1       — Dam-break scene
+//   2       — Pool / fill scene
+//   3       — Tall dam scene
+//   R       — Reset current scene
+//   SPACE   — Pause / Resume
+//   ESC     — Quit
 // ============================================================
-
-enum class RenderMode { Points, FluidSurface };
 
 int main() {
     // --- Init Window ---
@@ -42,28 +36,40 @@ int main() {
     if (!fluidRenderer.init(width, height)) {
         return -1;
     }
-    fluidRenderer.setFluidColor(0.15f, 0.45f, 0.95f, 0.85f);
+    fluidRenderer.setFluidColor(0.1f, 0.4f, 0.9f, 0.9f);
 
     // --- Init Solver ---
     SPHSolver solver;
-    solver.initDamBreak(40, 40);  // 1600 particles
+
+    int currentScene = 1;
+    auto loadScene = [&](int scene) {
+        currentScene = scene;
+        switch (scene) {
+            case 1: solver.initDamBreak(50, 50); break;     // 2500 particles
+            case 2: solver.initPool(0.35f);       break;     // fills bottom 35%
+            case 3: solver.initTallDam();         break;     // tall column
+            default: solver.initDamBreak(50, 50); break;
+        }
+        std::cout << "[Scene " << scene << "] " << solver.numParticles() << " particles\n";
+    };
+    loadScene(1);
 
     // --- State ---
-    RenderMode renderMode = RenderMode::Points;
     bool paused = false;
     float lastTime = renderer.getTime();
     int frameCount = 0;
     float fpsTimer = 0.0f;
 
+    // Point-size enable (required for gl_PointSize in vertex shader)
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
+
     std::cout << "\n=== SPH Fluid Simulation ===\n";
-    std::cout << "Particles: " << solver.numParticles() << "\n";
     std::cout << "Controls:\n";
-    std::cout << "  Left Click — Emit particles\n";
-    std::cout << "  R          — Reset simulation\n";
-    std::cout << "  SPACE      — Pause/Resume\n";
-    std::cout << "  1          — Point rendering\n";
-    std::cout << "  2          — Fluid surface rendering\n";
-    std::cout << "  ESC        — Quit\n\n";
+    std::cout << "  1/2/3  — Switch scene (dam / pool / tall-dam)\n";
+    std::cout << "  R      — Reset current scene\n";
+    std::cout << "  SPACE  — Pause / Resume\n";
+    std::cout << "  ESC    — Quit\n\n";
 
     // --- Main Loop ---
     while (!renderer.shouldClose()) {
@@ -78,7 +84,7 @@ int main() {
         frameCount++;
         fpsTimer += deltaTime;
         if (fpsTimer >= 1.0f) {
-            std::string title = "SPH Fluid — " + std::to_string(frameCount) + " FPS — " +
+            std::string title = "SPH Fluid  |  " + std::to_string(frameCount) + " FPS  |  " +
                                 std::to_string(solver.numParticles()) + " particles";
             glfwSetWindowTitle(win, title.c_str());
             frameCount = 0;
@@ -89,8 +95,9 @@ int main() {
         if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
             glfwSetWindowShouldClose(win, true);
         }
+
+        // Pause/resume (debounced)
         if (glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS) {
-            // Simple toggle with debounce
             static float lastToggle = 0.0f;
             if (currentTime - lastToggle > 0.3f) {
                 paused = !paused;
@@ -98,33 +105,16 @@ int main() {
                 std::cout << (paused ? "[Paused]" : "[Running]") << "\n";
             }
         }
-        if (glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS) {
-            solver.initDamBreak(40, 40);
-        }
-        if (glfwGetKey(win, GLFW_KEY_1) == GLFW_PRESS) {
-            renderMode = RenderMode::Points;
-        }
-        if (glfwGetKey(win, GLFW_KEY_2) == GLFW_PRESS) {
-            renderMode = RenderMode::FluidSurface;
-        }
 
-        // Emit particles on mouse click
-        if (glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-            double mx, my;
-            glfwGetCursorPos(win, &mx, &my);
-            // Emit a small burst
-            for (int i = 0; i < 3; ++i) {
-                float jx = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 10.0f;
-                float jy = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 10.0f;
-                solver.addParticle(static_cast<float>(mx) + jx,
-                                   static_cast<float>(my) + jy);
-            }
-        }
+        // Scene switching
+        if (glfwGetKey(win, GLFW_KEY_1) == GLFW_PRESS) loadScene(1);
+        if (glfwGetKey(win, GLFW_KEY_2) == GLFW_PRESS) loadScene(2);
+        if (glfwGetKey(win, GLFW_KEY_3) == GLFW_PRESS) loadScene(3);
+        if (glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS) loadScene(currentScene);
 
         // --- Physics ---
         if (!paused) {
-            // Run multiple sub-steps for stability
-            int subSteps = 3;
+            int subSteps = 4;
             for (int s = 0; s < subSteps; ++s) {
                 solver.update();
             }
@@ -132,18 +122,8 @@ int main() {
 
         // --- Render ---
         renderer.beginFrame();
-
         fluidRenderer.updateParticles(solver.getParticles());
-
-        switch (renderMode) {
-            case RenderMode::Points:
-                fluidRenderer.renderPoints(10.0f);
-                break;
-            case RenderMode::FluidSurface:
-                fluidRenderer.renderFluidSurface();
-                break;
-        }
-
+        fluidRenderer.render(currentTime);
         renderer.endFrame();
     }
 

@@ -4,7 +4,7 @@
 #include <iostream>
 
 SPHSolver::SPHSolver()
-    : spatialHash_(SimConfig::H)
+    : spatialHash_(SimConfig::H, 8192)
     , nextId_(0)
 {
     // Precompute kernel coefficients (done once, not per-frame)
@@ -62,6 +62,50 @@ void SPHSolver::initDroplet(float cx, float cy, float radius) {
     std::cout << "[SPH] Droplet initialized: " << particles_.size() << " particles\n";
 }
 
+void SPHSolver::initPool(float fillFraction) {
+    particles_.clear();
+    float spacing = SimConfig::PARTICLE_SPACING;
+
+    float poolTop = SimConfig::WINDOW_HEIGHT * (1.0f - fillFraction);
+    float margin = SimConfig::H;
+
+    for (float y = poolTop; y < SimConfig::WINDOW_HEIGHT - margin; y += spacing) {
+        for (float x = margin; x < SimConfig::WINDOW_WIDTH - margin; x += spacing) {
+            float jx = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.05f;
+            float jy = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.05f;
+
+            Particle p(x + jx, y + jy, nextId_++);
+            p.mass = SimConfig::PARTICLE_MASS;
+            particles_.push_back(p);
+        }
+    }
+
+    std::cout << "[SPH] Pool initialized: " << particles_.size() << " particles\n";
+}
+
+void SPHSolver::initTallDam() {
+    particles_.clear();
+    float spacing = SimConfig::PARTICLE_SPACING;
+    float margin = SimConfig::H;
+
+    // Tall column on the left (40% width, 85% height)
+    float colWidth = SimConfig::WINDOW_WIDTH * 0.35f;
+    float colTop = SimConfig::WINDOW_HEIGHT * 0.1f;
+
+    for (float y = colTop; y < SimConfig::WINDOW_HEIGHT - margin; y += spacing) {
+        for (float x = margin; x < colWidth; x += spacing) {
+            float jx = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.05f;
+            float jy = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.05f;
+
+            Particle p(x + jx, y + jy, nextId_++);
+            p.mass = SimConfig::PARTICLE_MASS;
+            particles_.push_back(p);
+        }
+    }
+
+    std::cout << "[SPH] Tall dam initialized: " << particles_.size() << " particles\n";
+}
+
 void SPHSolver::addParticle(float x, float y) {
     Particle p(x, y, nextId_++);
     p.mass = SimConfig::PARTICLE_MASS;
@@ -73,10 +117,12 @@ void SPHSolver::addParticle(float x, float y) {
 // ============================================================
 
 void SPHSolver::buildSpatialHash() {
-    spatialHash_.clear();
+    // Extract positions into contiguous array for compact grid build
+    positions_.resize(particles_.size());
     for (size_t i = 0; i < particles_.size(); ++i) {
-        spatialHash_.insert(static_cast<int>(i), particles_[i].position);
+        positions_[i] = particles_[i].position;
     }
+    spatialHash_.build(positions_.data(), static_cast<int>(particles_.size()));
 }
 
 // ============================================================

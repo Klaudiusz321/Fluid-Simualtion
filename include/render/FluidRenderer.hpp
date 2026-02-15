@@ -5,65 +5,53 @@
 #include <vector>
 #include <cstdint>
 
-/// Renders SPH fluid particles using OpenGL.
-/// Supports:
-///   1. Point sprite rendering (fast, simple)
-///   2. Screen-space fluid rendering (metaball-like, smooth surface)
+/// Renders SPH fluid using a 3-pass screen-space technique:
+///
+///   Pass 1: Render particles as Gaussian splats → accumulate density to FBO
+///   Pass 2: Bilateral/Gaussian blur to smooth the density field
+///   Pass 3: Composite with lighting, refraction, caustics, depth coloring
+///
+/// This is the same approach used in AAA games and ShaderToy fluid demos.
 class FluidRenderer {
 public:
     FluidRenderer();
     ~FluidRenderer();
 
-    /// Initialize shaders and buffers
     bool init(int screenWidth, int screenHeight);
-
-    /// Upload particle positions to GPU
     void updateParticles(const std::vector<Particle>& particles);
-
-    /// Render particles as colored point sprites
-    void renderPoints(float pointSize = 8.0f);
-
-    /// Render fluid using screen-space metaball technique:
-    ///   Pass 1: render depth/thickness to FBO
-    ///   Pass 2: blur
-    ///   Pass 3: composite fluid surface
-    void renderFluidSurface();
-
-    /// Cleanup GPU resources
+    void render(float time);
     void cleanup();
-
-    /// Set color for the fluid
     void setFluidColor(float r, float g, float b, float a = 1.0f);
 
 private:
     // Shader programs
-    uint32_t pointShader_ = 0;
-    uint32_t metaballShader_ = 0;
-    uint32_t blurShader_ = 0;
-    uint32_t compositeShader_ = 0;
+    uint32_t splatShader_ = 0;       // Pass 1: Gaussian splat
+    uint32_t blurShaderH_ = 0;       // Pass 2a: Horizontal blur
+    uint32_t blurShaderV_ = 0;       // Pass 2b: Vertical blur
+    uint32_t compositeShader_ = 0;   // Pass 3: Final composite
 
-    // Vertex buffer for particle positions
+    // Particle VBO
     uint32_t vao_ = 0;
     uint32_t vbo_ = 0;
     size_t particleCount_ = 0;
 
-    // Framebuffer objects for screen-space rendering
-    uint32_t fbo_ = 0;
-    uint32_t depthTexture_ = 0;
-    uint32_t thicknessTexture_ = 0;
-    uint32_t blurTexture_ = 0;
+    // FBOs and textures
+    uint32_t splatFBO_ = 0;
+    uint32_t splatTex_ = 0;
 
-    // Screen quad for fullscreen passes
+    uint32_t blurFBO_[2] = {};       // Ping-pong blur
+    uint32_t blurTex_[2] = {};
+
+    // Screen quad
     uint32_t quadVAO_ = 0;
     uint32_t quadVBO_ = 0;
 
     int screenWidth_ = 0;
     int screenHeight_ = 0;
+    float fluidColor_[4] = { 0.1f, 0.4f, 0.9f, 0.9f };
 
-    float fluidColor_[4] = { 0.2f, 0.5f, 0.9f, 0.8f };
-
-    // Helpers
     uint32_t compileShader(const char* vertSrc, const char* fragSrc);
     void initScreenQuad();
-    void initFramebuffers(int w, int h);
+    void createFBO(uint32_t& fbo, uint32_t& tex, int w, int h);
+    void setOrthoProjection(uint32_t shader, float w, float h);
 };
