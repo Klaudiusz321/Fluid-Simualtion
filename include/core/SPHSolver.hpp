@@ -43,6 +43,7 @@ public:
 private:
     std::vector<Particle> particles_;
     std::vector<Vec2> positions_;          // contiguous positions for spatial hash
+    std::vector<std::vector<int>> neighbourList_;
     SpatialHash spatialHash_;
     
     // Precomputed kernel coefficients

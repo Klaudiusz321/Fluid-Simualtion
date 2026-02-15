@@ -45,8 +45,8 @@ int main() {
     auto loadScene = [&](int scene) {
         currentScene = scene;
         switch (scene) {
-            case 1: solver.initDamBreak(50, 50); break;     // 2500 particles
-            case 2: solver.initPool(0.35f);       break;     // fills bottom 35%
+            case 1: solver.initDamBreak(50, 50); break;      // ~2500 particles
+            case 2: solver.initPool(0.30f);       break;     // fills bottom 30%
             case 3: solver.initTallDam();         break;     // tall column
             default: solver.initDamBreak(50, 50); break;
         }
@@ -114,7 +114,7 @@ int main() {
 
         // --- Physics ---
         if (!paused) {
-            int subSteps = 4;
+            int subSteps = 3;
             for (int s = 0; s < subSteps; ++s) {
                 solver.update();
             }

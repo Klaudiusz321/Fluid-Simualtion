@@ -130,31 +130,27 @@ void SPHSolver::buildSpatialHash() {
 // ============================================================
 
 void SPHSolver::computeDensityPressure() {
-    std::vector<int> neighbors;
-
-    for (size_t i = 0; i < particles_.size(); ++i) {
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
         auto& pi = particles_[i];
         pi.density = 0.0f;
 
-        neighbors.clear();
-        spatialHash_.queryNeighbors(pi.position, neighbors);
-
+        const auto& neighbors = neighbourList_[i];
         for (int j : neighbors) {
+            // NOTE: do NOT skip j==i — self-contribution is essential in SPH!
             const auto& pj = particles_[j];
             Vec2 rij = pj.position - pi.position;
             float r2 = rij.lengthSq();
 
             if (r2 < SimConfig::HSQ) {
-                // Poly6 kernel for density
                 pi.density += pj.mass * SPHKernels::poly6(r2, SimConfig::H, poly6Coeff_);
             }
         }
 
         // Clamp minimum density to avoid division by zero
-        pi.density = std::max(pi.density, SimConfig::REST_DENSITY * 0.5f);
+        pi.density = std::max(pi.density, SimConfig::REST_DENSITY * 0.01f);
 
-        // Tait equation of state: p = k * (ρ/ρ₀ - 1)
-        // Using the simpler variant: p = k * (ρ - ρ₀)
+        // Tait equation of state: p = k * (ρ - ρ₀)
         pi.pressure = SimConfig::GAS_CONSTANT * (pi.density - SimConfig::REST_DENSITY);
     }
 }
@@ -164,18 +160,16 @@ void SPHSolver::computeDensityPressure() {
 // ============================================================
 
 void SPHSolver::computeForces() {
-    std::vector<int> neighbors;
-
-    for (size_t i = 0; i < particles_.size(); ++i) {
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
         auto& pi = particles_[i];
         Vec2 fPressure(0.0f, 0.0f);
         Vec2 fViscosity(0.0f, 0.0f);
 
-        neighbors.clear();
-        spatialHash_.queryNeighbors(pi.position, neighbors);
+        const auto& neighbors = neighbourList_[i];
 
         for (int jIdx : neighbors) {
-            if (static_cast<size_t>(jIdx) == i) continue;  // Skip self
+            if (jIdx == i) continue;  // Skip self
 
             const auto& pj = particles_[jIdx];
             Vec2 rij = pj.position - pi.position;
@@ -213,17 +207,15 @@ void SPHSolver::computeForces() {
 // ============================================================
 
 void SPHSolver::computeSurfaceTension() {
-    std::vector<int> neighbors;
-
     // Step 1: Compute color field, gradient, and laplacian
-    for (size_t i = 0; i < particles_.size(); ++i) {
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
         auto& pi = particles_[i];
         pi.colorField = 0.0f;
         pi.colorGradient = Vec2(0.0f, 0.0f);
         pi.colorLaplacian = 0.0f;
 
-        neighbors.clear();
-        spatialHash_.queryNeighbors(pi.position, neighbors);
+        const auto& neighbors = neighbourList_[i];
 
         for (int jIdx : neighbors) {
             const auto& pj = particles_[jIdx];
@@ -268,15 +260,14 @@ void SPHSolver::computeSurfaceTension() {
 void SPHSolver::applyXSPH() {
     // Compute corrections first, apply after (so we don't modify while iterating)
     std::vector<Vec2> corrections(particles_.size(), Vec2(0.0f, 0.0f));
-    std::vector<int> neighbors;
 
-    for (size_t i = 0; i < particles_.size(); ++i) {
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
         const auto& pi = particles_[i];
-        neighbors.clear();
-        spatialHash_.queryNeighbors(pi.position, neighbors);
+        const auto& neighbors = neighbourList_[i];
 
         for (int jIdx : neighbors) {
-            if (static_cast<size_t>(jIdx) == i) continue;
+            if (jIdx == i) continue;
 
             const auto& pj = particles_[jIdx];
             Vec2 rij = pj.position - pi.position;
@@ -376,9 +367,22 @@ float SPHSolver::computeAdaptiveDT() const {
 
 void SPHSolver::update() {
     buildSpatialHash();
+
+    if (neighbourList_.size() != particles_.size()){
+        neighbourList_.resize(particles_.size());
+    }
+    #pragma omp parallel for
+    for(int i = 0; i < static_cast<int>(particles_.size()); ++i){
+        neighbourList_[i].clear();
+        spatialHash_.queryNeighbors(particles_[i].position, neighbourList_[i]);
+    }
+
     computeDensityPressure();
     computeForces();
-    computeSurfaceTension();
+    // Surface tension disabled (SimConfig::SURFACE_TENSION == 0)
+    if (SimConfig::SURFACE_TENSION > 0.0f) {
+        computeSurfaceTension();
+    }
     integrate();
     applyXSPH();
     enforceBoundaries();
