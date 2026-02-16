@@ -40,6 +40,10 @@ public:
     /// Add a single particle at runtime (e.g., for emitters)
     void addParticle(float x, float y);
 
+    /// Apply an external force at a world position (mouse interaction)
+    /// All particles within radius receive a force in the given direction.
+    void applyForceAt(float px, float py, float dirX, float dirY, float radius, float strength);
+
 private:
     std::vector<Particle> particles_;
     std::vector<Vec2> positions_;          // contiguous positions for spatial hash

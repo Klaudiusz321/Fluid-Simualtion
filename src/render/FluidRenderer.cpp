@@ -3,101 +3,143 @@
 #include <glad/gl.h>
 #include <iostream>
 #include <vector>
-#include <cmath>
 
 // ============================================================
-// Vertex shader — positions particles as GL_POINTS,
-// passes speed to fragment shader for velocity coloring
+// PASS 1: Gaussian splat — each particle writes a smooth blob
 // ============================================================
 
-static const char* sphereVertSrc = R"(
+static const char* splatVertSrc = R"(
 #version 430 core
 layout(location = 0) in vec2 aPos;
-layout(location = 1) in float aSpeed;
 
 uniform mat4 uProjection;
 uniform float uPointSize;
 
-out float vSpeed;
-
 void main() {
     gl_Position = uProjection * vec4(aPos, 0.0, 1.0);
     gl_PointSize = uPointSize;
-    vSpeed = aSpeed;
+}
+)";
+
+static const char* splatFragSrc = R"(
+#version 430 core
+out vec4 FragColor;
+
+void main() {
+    vec2 c = gl_PointCoord * 2.0 - 1.0;
+    float r2 = dot(c, c);
+    if (r2 > 1.0) discard;
+
+    // Smooth Gaussian energy distribution
+    float energy = exp(-r2 * 4.0) * 0.8;
+    FragColor = vec4(energy, energy, energy, 1.0);
 }
 )";
 
 // ============================================================
-// Fragment shader — 3D-shaded sphere per particle
-//   - Computes sphere normal from gl_PointCoord
-//   - Phong lighting (ambient + diffuse + specular)
-//   - Velocity-based color gradient (slow=deep blue, fast=cyan/white)
-//   - Soft shadow at bottom of sphere
-//   - Fresnel rim highlight
+// PASS 2: Separable Gaussian blur (two passes: H then V)
 // ============================================================
 
-static const char* sphereFragSrc = R"(
+static const char* quadVertSrc = R"(
 #version 430 core
-in float vSpeed;
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    vUV = aUV;
+}
+)";
+
+static const char* blurFragSrc = R"(
+#version 430 core
+in vec2 vUV;
 out vec4 FragColor;
 
-uniform vec4 uBaseColor;
+uniform sampler2D uTex;
+uniform vec2 uDirection;  // (1/w, 0) for horizontal, (0, 1/h) for vertical
 
 void main() {
-    // Map point coord to [-1, 1]
-    vec2 coord = gl_PointCoord * 2.0 - 1.0;
-    float r2 = dot(coord, coord);
-
-    // Discard outside circle → makes it look like a sphere
-    if (r2 > 1.0) discard;
-
-    // Reconstruct sphere normal (z points toward camera)
-    vec3 normal = vec3(coord, sqrt(1.0 - r2));
-
-    // --- Lighting setup ---
-    vec3 lightDir = normalize(vec3(0.5, -0.7, 0.8));
-    vec3 viewDir  = vec3(0.0, 0.0, 1.0);
-
-    // Diffuse
-    float diff = max(dot(normal, lightDir), 0.0);
-
-    // Specular (Blinn-Phong)
-    vec3 halfDir = normalize(lightDir + viewDir);
-    float spec = pow(max(dot(normal, halfDir), 0.0), 80.0);
-
-    // Fresnel rim (light edge)
-    float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
-
-    // --- Velocity-based color ---
-    // speed: 0 = still (deep blue), ~150+ = fast (cyan/white)
-    // Typical sim velocities: 0-200 px/s, so divide by 150 for full range
-    float t = clamp(vSpeed / 150.0, 0.0, 1.0);
-
-    vec3 slowColor = uBaseColor.rgb;                      // Deep blue
-    vec3 midColor  = vec3(0.1, 0.75, 0.95);              // Teal / cyan
-    vec3 fastColor = vec3(0.85, 0.95, 1.0);              // Near-white
-
-    vec3 baseColor;
-    if (t < 0.5) {
-        baseColor = mix(slowColor, midColor, t * 2.0);
-    } else {
-        baseColor = mix(midColor, fastColor, (t - 0.5) * 2.0);
+    // 9-tap Gaussian blur with sigma ~ 4.0
+    float weights[5] = float[](0.227027, 0.194596, 0.121621, 0.054054, 0.016216);
+    
+    vec3 result = texture(uTex, vUV).rgb * weights[0];
+    
+    for (int i = 1; i < 5; ++i) {
+        vec2 offset = uDirection * float(i) * 1.5;
+        result += texture(uTex, vUV + offset).rgb * weights[i];
+        result += texture(uTex, vUV - offset).rgb * weights[i];
     }
+    
+    FragColor = vec4(result, 1.0);
+}
+)";
 
-    // --- Compose ---
-    float ambient = 0.15;
-    vec3 color = baseColor * (ambient + diff * 0.7);
-    color += vec3(1.0) * spec * 0.6;                      // White specular
-    color += vec3(0.3, 0.5, 0.8) * fresnel * 0.25;       // Blue rim
+// ============================================================
+// PASS 3: Composite — ShaderToy-quality fluid surface
+// ============================================================
 
-    // Soft contact shadow at bottom of sphere
-    float shadow = smoothstep(-1.0, -0.3, coord.y);
-    color *= (0.7 + 0.3 * shadow);
+static const char* compositeFragSrc = R"(
+#version 430 core
+in vec2 vUV;
+out vec4 FragColor;
 
+uniform sampler2D uDensityTex;
+uniform vec4 uFluidColor;
+uniform float uTime;
+uniform vec2 uResolution;
+
+// Density-based color ramp: blue → cyan → green → yellow → red
+vec3 densityToColor(float t) {
+    // t in [0, 1]
+    vec3 c;
+    if (t < 0.25) {
+        float s = t / 0.25;
+        c = mix(vec3(0.0, 0.0, 0.6), vec3(0.0, 0.5, 1.0), s);  // dark blue → cyan
+    } else if (t < 0.5) {
+        float s = (t - 0.25) / 0.25;
+        c = mix(vec3(0.0, 0.5, 1.0), vec3(0.0, 1.0, 0.2), s);  // cyan → green
+    } else if (t < 0.75) {
+        float s = (t - 0.5) / 0.25;
+        c = mix(vec3(0.0, 1.0, 0.2), vec3(1.0, 1.0, 0.0), s);  // green → yellow
+    } else {
+        float s = (t - 0.75) / 0.25;
+        c = mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.1, 0.0), s);  // yellow → red
+    }
+    return c;
+}
+
+void main() {
+    float density = texture(uDensityTex, vUV).r;
+    
+    // Surface extraction with smooth threshold
+    float surface = smoothstep(0.02, 0.12, density);
+    
+    if (surface < 0.001) {
+        // Background — dark
+        FragColor = vec4(vec3(0.01, 0.01, 0.02), 1.0);
+        return;
+    }
+    
+    // Map density to [0,1] for color ramp
+    float t = clamp(density * 0.8, 0.0, 1.0);
+    vec3 waterColor = densityToColor(t);
+    
+    // Subtle edge highlight
+    vec2 texel = 1.0 / uResolution;
+    float dL = texture(uDensityTex, vUV - vec2(texel.x, 0.0)).r;
+    float dR = texture(uDensityTex, vUV + vec2(texel.x, 0.0)).r;
+    float dU = texture(uDensityTex, vUV - vec2(0.0, texel.y)).r;
+    float dD = texture(uDensityTex, vUV + vec2(0.0, texel.y)).r;
+    float gradLen = length(vec2(dR - dL, dD - dU));
+    float edge = smoothstep(0.01, 0.08, gradLen) * surface;
+    waterColor += vec3(0.15) * edge;
+    
     // Gamma correction
-    color = pow(color, vec3(1.0 / 2.2));
-
-    FragColor = vec4(color, 1.0);
+    waterColor = pow(waterColor, vec3(1.0 / 2.2));
+    
+    float alpha = surface;
+    FragColor = vec4(waterColor, alpha);
 }
 )";
 
@@ -115,30 +157,35 @@ bool FluidRenderer::init(int screenWidth, int screenHeight) {
     screenWidth_ = screenWidth;
     screenHeight_ = screenHeight;
 
-    shader_ = compileShader(sphereVertSrc, sphereFragSrc);
-    if (!shader_) {
+    // Compile shaders
+    splatShader_ = compileShader(splatVertSrc, splatFragSrc);
+    blurShaderH_ = compileShader(quadVertSrc, blurFragSrc);
+    blurShaderV_ = compileShader(quadVertSrc, blurFragSrc);
+    compositeShader_ = compileShader(quadVertSrc, compositeFragSrc);
+
+    if (!splatShader_ || !blurShaderH_ || !compositeShader_) {
         std::cerr << "[FluidRenderer] Shader compilation failed\n";
         return false;
     }
 
-    // VAO/VBO — interleaved: [x, y, speed] per particle
+    // Particle VAO/VBO
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
-
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-
-    // position (vec2)
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
     glEnableVertexAttribArray(0);
-
-    // speed (float)
-    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)(2 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
     glBindVertexArray(0);
 
-    std::cout << "[FluidRenderer] Initialized (3D sphere style)\n";
+    // Screen quad
+    initScreenQuad();
+
+    // FBOs: splat + 2 ping-pong for blur
+    createFBO(splatFBO_, splatTex_, screenWidth, screenHeight);
+    createFBO(blurFBO_[0], blurTex_[0], screenWidth, screenHeight);
+    createFBO(blurFBO_[1], blurTex_[1], screenWidth, screenHeight);
+
+    std::cout << "[FluidRenderer] Initialized (3-pass pipeline)\n";
     return true;
 }
 
@@ -146,50 +193,110 @@ void FluidRenderer::updateParticles(const std::vector<Particle>& particles) {
     particleCount_ = particles.size();
     if (particleCount_ == 0) return;
 
-    // Interleaved buffer: [x, y, speed, x, y, speed, ...]
-    std::vector<float> data(particleCount_ * 3);
+    std::vector<float> positions(particleCount_ * 2);
     for (size_t i = 0; i < particleCount_; ++i) {
-        data[i * 3 + 0] = particles[i].position.x;
-        data[i * 3 + 1] = particles[i].position.y;
-        data[i * 3 + 2] = particles[i].velocity.length();
+        positions[i * 2 + 0] = particles[i].position.x;
+        positions[i * 2 + 1] = particles[i].position.y;
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(data.size() * sizeof(float)),
-                 data.data(), GL_DYNAMIC_DRAW);
+                 static_cast<GLsizeiptr>(positions.size() * sizeof(float)),
+                 positions.data(), GL_DYNAMIC_DRAW);
 }
 
-void FluidRenderer::render(float /*time*/) {
+void FluidRenderer::render(float time) {
     if (particleCount_ == 0) return;
 
     float w = static_cast<float>(screenWidth_);
     float h = static_cast<float>(screenHeight_);
 
-    // Dark background
-    glClearColor(0.01f, 0.01f, 0.02f, 1.0f);
+    // ==== PASS 1: Splat particles to density FBO ====
+    glBindFramebuffer(GL_FRAMEBUFFER, splatFBO_);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    // Enable point sprites and depth-like sorting
-    glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendFunc(GL_ONE, GL_ONE);  // Additive blending
 
-    glUseProgram(shader_);
-    setOrthoProjection(shader_, w, h);
-    glUniform1f(glGetUniformLocation(shader_, "uPointSize"), 28.0f);
-    glUniform4fv(glGetUniformLocation(shader_, "uBaseColor"), 1, fluidColor_);
+    glUseProgram(splatShader_);
+    setOrthoProjection(splatShader_, w, h);
+    glUniform1f(glGetUniformLocation(splatShader_, "uPointSize"), 24.0f);
 
     glBindVertexArray(vao_);
     glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(particleCount_));
+    glBindVertexArray(0);
+
+    // ==== PASS 2: Gaussian blur (3 iterations of H+V for very smooth result) ====
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_BLEND);
+
+    // Use the same blur shader, just change direction uniform
+    uint32_t currentTex = splatTex_;
+
+    int blurPasses = 3;
+    for (int pass = 0; pass < blurPasses; ++pass) {
+        // Horizontal blur: currentTex → blurTex_[0]
+        glBindFramebuffer(GL_FRAMEBUFFER, blurFBO_[0]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(blurShaderH_);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, currentTex);
+        glUniform1i(glGetUniformLocation(blurShaderH_, "uTex"), 0);
+        glUniform2f(glGetUniformLocation(blurShaderH_, "uDirection"), 1.0f / w, 0.0f);
+        glBindVertexArray(quadVAO_);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        // Vertical blur: blurTex_[0] → blurTex_[1]
+        glBindFramebuffer(GL_FRAMEBUFFER, blurFBO_[1]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBindTexture(GL_TEXTURE_2D, blurTex_[0]);
+        glUniform2f(glGetUniformLocation(blurShaderH_, "uDirection"), 0.0f, 1.0f / h);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        currentTex = blurTex_[1];  // Next iteration reads from this
+    }
+
+    // ==== PASS 3: Composite to screen ====
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(compositeShader_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, blurTex_[1]);
+    glUniform1i(glGetUniformLocation(compositeShader_, "uDensityTex"), 0);
+    glUniform4fv(glGetUniformLocation(compositeShader_, "uFluidColor"), 1, fluidColor_);
+    glUniform1f(glGetUniformLocation(compositeShader_, "uTime"), time);
+    glUniform2f(glGetUniformLocation(compositeShader_, "uResolution"), w, h);
+
+    glBindVertexArray(quadVAO_);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glUseProgram(0);
 }
 
 void FluidRenderer::cleanup() {
-    if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
-    if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
-    if (shader_) { glDeleteProgram(shader_); shader_ = 0; }
+    auto del = [](uint32_t& id, auto fn) { if (id) { fn(1, &id); id = 0; } };
+    auto delProg = [](uint32_t& id) { if (id) { glDeleteProgram(id); id = 0; } };
+
+    del(vao_, glDeleteVertexArrays);
+    del(vbo_, glDeleteBuffers);
+    del(quadVAO_, glDeleteVertexArrays);
+    del(quadVBO_, glDeleteBuffers);
+    del(splatFBO_, glDeleteFramebuffers);
+    del(splatTex_, glDeleteTextures);
+    for (int i = 0; i < 2; ++i) {
+        del(blurFBO_[i], glDeleteFramebuffers);
+        del(blurTex_[i], glDeleteTextures);
+    }
+    delProg(splatShader_);
+    delProg(blurShaderH_);
+    delProg(blurShaderV_);
+    delProg(compositeShader_);
 }
 
 void FluidRenderer::setFluidColor(float r, float g, float b, float a) {
@@ -241,6 +348,49 @@ uint32_t FluidRenderer::compileShader(const char* vertSrc, const char* fragSrc) 
     glDeleteShader(vert);
     glDeleteShader(frag);
     return program;
+}
+
+void FluidRenderer::initScreenQuad() {
+    float quadVerts[] = {
+        -1.0f, -1.0f,  0.0f, 0.0f,
+         1.0f, -1.0f,  1.0f, 0.0f,
+        -1.0f,  1.0f,  0.0f, 1.0f,
+         1.0f,  1.0f,  1.0f, 1.0f,
+    };
+
+    glGenVertexArrays(1, &quadVAO_);
+    glGenBuffers(1, &quadVBO_);
+
+    glBindVertexArray(quadVAO_);
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+}
+
+void FluidRenderer::createFBO(uint32_t& fbo, uint32_t& tex, int w, int h) {
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "[FluidRenderer] FBO incomplete!\n";
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void FluidRenderer::setOrthoProjection(uint32_t shader, float w, float h) {

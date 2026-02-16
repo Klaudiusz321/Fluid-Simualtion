@@ -23,18 +23,27 @@ void SPHSolver::initDamBreak(int rows, int cols) {
     particles_.reserve(rows * cols);
 
     float spacing = SimConfig::PARTICLE_SPACING;
-    float startX = SimConfig::WINDOW_WIDTH * 0.1f;
-    float startY = SimConfig::WINDOW_HEIGHT * 0.3f;
+    float margin  = SimConfig::H;
+
+    // Place the dam column on the left side, making sure it fits within the window
+    float startX = margin;
+    float maxY   = SimConfig::WINDOW_HEIGHT - margin;
+    // Start from the bottom so the column is grounded
+    float startY = maxY - rows * spacing;
+    if (startY < margin) startY = margin;  // clamp to top
 
     for (int i = 0; i < rows; ++i) {
+        float y = startY + i * spacing;
+        if (y > maxY) break;  // don't place particles outside boundary
         for (int j = 0; j < cols; ++j) {
+            float x = startX + j * spacing;
+            if (x > SimConfig::WINDOW_WIDTH - margin) break;  // stay in bounds
+
             // Small jitter to break symmetry
             float jitterX = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.1f;
             float jitterY = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * spacing * 0.1f;
 
-            Particle p(startX + j * spacing + jitterX,
-                       startY + i * spacing + jitterY,
-                       nextId_++);
+            Particle p(x + jitterX, y + jitterY, nextId_++);
             p.mass = SimConfig::PARTICLE_MASS;
             particles_.push_back(p);
         }
@@ -137,7 +146,7 @@ void SPHSolver::computeDensityPressure() {
 
         const auto& neighbors = neighbourList_[i];
         for (int j : neighbors) {
-            // NOTE: do NOT skip j==i — self-contribution is essential in SPH!
+            if (j == i) continue;
             const auto& pj = particles_[j];
             Vec2 rij = pj.position - pi.position;
             float r2 = rij.lengthSq();
@@ -148,12 +157,10 @@ void SPHSolver::computeDensityPressure() {
         }
 
         // Clamp minimum density to avoid division by zero
-        pi.density = std::max(pi.density, SimConfig::REST_DENSITY * 0.01f);
+        pi.density = std::max(pi.density, SimConfig::REST_DENSITY * 0.5f);
 
         // Tait equation of state: p = k * (ρ - ρ₀)
-        // Clamp to non-negative to prevent tensile instability
-        // (negative pressure creates artificial attraction → particle clumping)
-        pi.pressure = std::max(0.0f, SimConfig::GAS_CONSTANT * (pi.density - SimConfig::REST_DENSITY));
+        pi.pressure = SimConfig::GAS_CONSTANT * (pi.density - SimConfig::REST_DENSITY);
     }
 }
 
@@ -181,12 +188,8 @@ void SPHSolver::computeForces() {
                 Vec2 rNorm = rij * (1.0f / r);
 
                 // Pressure force (Spiky kernel gradient)
-                // rij = r_j - r_i, so rNorm points from i toward j.
-                // ∇_i W = W'(r) * (r_i - r_j)/r = W'(r) * (-rNorm)
-                // F_p = -m_j (p_i+p_j)/(2ρ_j) * ∇_i W
-                //      = -m_j (p_i+p_j)/(2ρ_j) * W'(r) * (-rNorm)
-                //      = rNorm * [m_j (p_i+p_j)/(2ρ_j) * W'(r)]
-                float pressureMag = pj.mass *
+                // F_p = -m_j * (p_i + p_j) / (2 * ρ_j) * ∇W_spiky
+                float pressureMag = -pj.mass *
                     (pi.pressure + pj.pressure) / (2.0f * pj.density) *
                     SPHKernels::spikyGrad(r, SimConfig::H, spikyGradCoeff_);
                 fPressure += rNorm * pressureMag;
@@ -368,6 +371,30 @@ float SPHSolver::computeAdaptiveDT() const {
 }
 
 // ============================================================
+// External Force (mouse interaction)
+// ============================================================
+
+void SPHSolver::applyForceAt(float px, float py, float dirX, float dirY, float radius, float strength) {
+    float r2max = radius * radius;
+    Vec2 dir(dirX, dirY);
+    float dirLen = dir.length();
+    if (dirLen < 1e-6f) return;
+    dir = dir * (1.0f / dirLen);  // normalize direction
+
+    for (auto& p : particles_) {
+        float dx = p.position.x - px;
+        float dy = p.position.y - py;
+        float r2 = dx * dx + dy * dy;
+        if (r2 < r2max && r2 > 1e-6f) {
+            // Smooth falloff: strongest at center, zero at radius
+            float t = 1.0f - r2 / r2max;
+            float forceMag = strength * t * t;  // quadratic falloff
+            p.velocity += dir * (forceMag * SimConfig::DT);
+        }
+    }
+}
+
+// ============================================================
 // Main Update
 // ============================================================
 
@@ -385,10 +412,7 @@ void SPHSolver::update() {
 
     computeDensityPressure();
     computeForces();
-    // Surface tension disabled (SimConfig::SURFACE_TENSION == 0)
-    if (SimConfig::SURFACE_TENSION > 0.0f) {
-        computeSurfaceTension();
-    }
+    computeSurfaceTension();
     integrate();
     applyXSPH();
     enforceBoundaries();

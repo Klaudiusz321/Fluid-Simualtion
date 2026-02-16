@@ -10,11 +10,11 @@ namespace SPHKernels {
     constexpr float PI = 3.14159265358979323846f;
 
     // ============================================================
-    // Poly6 Kernel — used for density estimation (2D)
-    // W(r, h) = (4 / πh⁸) * (h² - r²)³  for 0 ≤ r ≤ h
+    // Poly6 Kernel — used for density estimation
+    // W(r, h) = (315 / 64πh⁹) * (h² - r²)³  for 0 ≤ r ≤ h
     // ============================================================
     inline float poly6Coeff(float h) {
-        return 4.0f / (PI * std::pow(h, 8.0f));
+        return 315.0f / (64.0f * PI * std::pow(h, 9.0f));
     }
 
     inline float poly6(float r2, float h, float coeff) {
@@ -42,11 +42,11 @@ namespace SPHKernels {
     }
 
     // ============================================================
-    // Spiky Kernel Gradient — used for pressure force (2D)
-    // grad W(r, h) = -(30 / πh⁵) * (h - r)² * (r_hat)
+    // Spiky Kernel Gradient — used for pressure force
+    // grad W(r, h) = -(45 / πh⁶) * (h - r)² * (r_hat)
     // ============================================================
     inline float spikyGradCoeff(float h) {
-        return -30.0f / (PI * std::pow(h, 5.0f));
+        return -45.0f / (PI * std::pow(h, 6.0f));
     }
 
     /// Returns scalar multiplier for gradient (multiply by normalized rij)
@@ -57,11 +57,11 @@ namespace SPHKernels {
     }
 
     // ============================================================
-    // Viscosity Kernel Laplacian — used for viscosity force (2D)
-    // ∇²W(r, h) = (40 / πh⁵) * (h - r)
+    // Viscosity Kernel Laplacian — used for viscosity force
+    // ∇²W(r, h) = (45 / πh⁶) * (h - r)
     // ============================================================
     inline float viscLapCoeff(float h) {
-        return 40.0f / (PI * std::pow(h, 5.0f));
+        return 45.0f / (PI * std::pow(h, 6.0f));
     }
 
     inline float viscLaplacian(float r, float h, float coeff) {
