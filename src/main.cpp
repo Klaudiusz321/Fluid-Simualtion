@@ -73,7 +73,7 @@ int main() {
     auto loadScene = [&](int scene) {
         currentScene = scene;
         switch (scene) {
-            case 1: solver.initDamBreak(80, 40); break;
+            case 1: solver.initDamBreak(40, 20); break;
             case 2: solver.initPool(0.85f);      break;   // fills 85% — nearly full
             case 3: solver.initTallDam();         break;
             default: solver.initPool(0.85f);      break;
